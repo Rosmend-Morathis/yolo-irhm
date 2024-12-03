@@ -1,383 +1,26 @@
-源码理解
-DLA 类的 __init__ 函数解释
-参数说明
-- levels: 一个列表，表示每个层级的层数。例如 [1, 1, 1, 2, 2, 1] 表示有 6 个层级，每个层级的层数分别为 1, 1, 1, 2, 2, 1。
-- channels: 一个列表，表示每个层级的通道数。例如 [16, 32, 64, 128, 256, 512] 表示有 6 个层级，每个层级的通道数分别为 16, 32, 64, 128, 256, 512。
-- num_classes: 整数，表示分类任务的类别数，默认为 1000。
-- block: 模块类型，默认为 BasicBlock。可以是 BasicBlock, Bottleneck, 或 BottleneckX。
-- residual_root: 布尔值，表示是否在根节点使用残差连接，默认为 False。
-- linear_root: 布尔值，表示是否在根节点使用线性层，默认为 False。
-- opt: 配置选项，默认为 None。
-
-初始化过程
-1. 初始化基本属性
-self.channels = channels
-self.num_classes = num_classes
-
-
-2. 定义基础层
-self.base_layer = nn.Sequential(
-    nn.Conv2d(3, channels[0], kernel_size=7, stride=1, padding=3, bias=False),
-    nn.BatchNorm2d(channels[0], momentum=BN_MOMENTUM),
-    nn.ReLU(inplace=True)
-)
-
-- nn.Conv2d(3, channels[0], kernel_size=7, stride=1, padding=3, bias=False): 输入通道数为 3（RGB 图像），输出通道数为 channels[0]，卷积核大小为 7x7，步长为 1，填充为 3，不使用偏置。
-- nn.BatchNorm2d(channels[0], momentum=BN_MOMENTUM): 批归一化层，动量为 BN_MOMENTUM。
-- nn.ReLU(inplace=True): ReLU 激活函数，原地操作。
-
-3. 定义预处理层（可选）
-if opt.pre_img:
-    self.pre_img_layer = nn.Sequential(
-        nn.Conv2d(3, channels[0], kernel_size=7, stride=1, padding=3, bias=False),
-        nn.BatchNorm2d(channels[0], momentum=BN_MOMENTUM),
-        nn.ReLU(inplace=True)
-    )
-if opt.pre_hm:
-    self.pre_hm_layer = nn.Sequential(
-        nn.Conv2d(1, channels[0], kernel_size=7, stride=1, padding=3, bias=False),
-        nn.BatchNorm2d(channels[0], momentum=BN_MOMENTUM),
-        nn.ReLU(inplace=True)
-    )
-
-- pre_img_layer 和 pre_hm_layer 分别用于处理前一帧的图像和热图，结构与 base_layer 相同。
-
-4. 定义层级
-self.level0 = self._make_conv_level(channels[0], channels[0], levels[0])
-self.level1 = self._make_conv_level(channels[0], channels[1], levels[1], stride=2)
-self.level2 = Tree(levels[2], block, channels[1], channels[2], 2, level_root=False, root_residual=residual_root)
-self.level3 = Tree(levels[3], block, channels[2], channels[3], 2, level_root=True, root_residual=residual_root)
-self.level4 = Tree(levels[4], block, channels[3], channels[4], 2, level_root=True, root_residual=residual_root)
-self.level5 = Tree(levels[5], block, channels[4], channels[5], 2, level_root=True, root_residual=residual_root)
-
-- _make_conv_level 方法用于创建卷积层。
-- Tree 类用于创建树状结构的层级，每个层级可以包含多个子层级。
-
-5. 定义融合模块
-self.fusion = Transformer_Fusion(d_model=16, nhead=4, num_fusion_encoder_layers=1, dim_feedforward=64)
-self.fusion_m = Transformer_Fusion_M(d_model=16, nhead=4, num_fusion_encoder_layers=1, dim_feedforward=64)
-self.pos_encoding = PositionEmbeddingSine(num_pos_feats=16//2, sine_type='lin_sine', avoid_aliazing=True, max_spatial_resolution=60)
-self.patchembed = nn.Conv2d(16, 16, kernel_size=16, stride=16)
-
-- Transformer_Fusion 和 Transformer_Fusion_M 是自定义的融合模块。
-- PositionEmbeddingSine 用于生成位置编码。
-- patchembed 是一个卷积层，用于将特征图转换为 patch。
-
-6. 辅助方法
-def _make_level(self, block, inplanes, planes, blocks, stride=1):
-    downsample = None
-    if stride != 1 or inplanes != planes:
-        downsample = nn.Sequential(
-            nn.MaxPool2d(stride, stride=stride),
-            nn.Conv2d(inplanes, planes, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(planes, momentum=BN_MOMENTUM),
-        )
-
-    layers = []
-    layers.append(block(inplanes, planes, stride, downsample=downsample))
-    for i in range(1, blocks):
-        layers.append(block(inplanes, planes))
-
-    return nn.Sequential(*layers)
-
-def _make_conv_level(self, inplanes, planes, convs, stride=1, dilation=1):
-    modules = []
-    for i in range(convs):
-        modules.extend([
-            nn.Conv2d(inplanes, planes, kernel_size=3, stride=stride if i == 0 else 1, padding=dilation, bias=False, dilation=dilation),
-            nn.BatchNorm2d(planes, momentum=BN_MOMENTUM),
-            nn.ReLU(inplace=True)
-        ])
-        inplanes = planes
-    return nn.Sequential(*modules)
-
-- _make_level 方法用于创建带有下采样的层级。
-- _make_conv_level 方法用于创建多个卷积层。
-
-7. 辅助方法（特征转换）
-def token2feature(self, tokens, h, w):
-    L, B, D = tokens.shape
-    x = tokens.permute(1, 2, 0).view(B, D, H, W).contiguous()
-    return x
-
-def feature2token(self, x):
-    B, C, W, H = x.shape
-    L = W * H
-    tokens = x.view(B, C, L).permute(2, 0, 1).contiguous()
-    return tokens
-
-def get_positional_encoding(self, feat):
-    b, _, h, w = feat.shape
-    mask = torch.zeros((b, h, w), dtype=torch.bool, device=feat.device)
-    pos = self.pos_encoding(mask)
-    return pos.reshape(b, -1, h, w)
-
-- token2feature 将 token 转换为特征图。
-- feature2token 将特征图转换为 token。
-- get_positional_encoding 生成位置编码。
-
-辅助方法函数解释
-
-1. token2feature(self, tokens, h, w)
-这个函数的作用是将 token 转换为特征图。
-- 参数:
-  - tokens: 形状为 (L, B, D) 的 tensor，其中 L 是 token 数量，B 是 batch 大小，D 是每个 token 的维度。
-  - h: 特征图的高度。
-  - w: 特征图的宽度。
-- 步骤:
-  1. 获取 tokens 的形状 (L, B, D)。
-  2. 设置 H 和 W 为传入的高度和宽度。
-  3. 使用 permute 方法将 tokens 的形状从 (L, B, D) 转换为 (B, D, L)。
-  4. 使用 view 方法将形状从 (B, D, L) 转换为 (B, D, H, W)。
-  5. 使用 contiguous 方法确保 tensor 在内存中是连续的，以便后续操作。
-- 返回:
-  - 形状为 (B, D, H, W) 的特征图。
-def token2feature(self, tokens, h, w):
-    L, B, D = tokens.shape
-    H, W = h, w
-    x = tokens.permute(1, 2, 0).view(B, D, H, W).contiguous()
-    return x
-
-2. feature2token(self, x)
-这个函数的作用是将特征图转换为 token。
-- 参数:
-  - x: 形状为 (B, C, W, H) 的特征图，其中 B 是 batch 大小，C 是通道数，W 和 H 分别是特征图的宽度和高度。
-- 步骤:
-  1. 获取 x 的形状 (B, C, W, H)。
-  2. 计算 L 为 W * H，即 token 的数量。
-  3. 使用 view 方法将形状从 (B, C, W, H) 转换为 (B, C, L)。
-  4. 使用 permute 方法将形状从 (B, C, L) 转换为 (L, B, C)。
-  5. 使用 contiguous 方法确保 tensor 在内存中是连续的，以便后续操作。
-- 返回:
-  - 形状为 (L, B, C) 的 token。
-def feature2token(self, x):
-    B, C, W, H = x.shape
-    L = W * H
-    tokens = x.view(B, C, L).permute(2, 0, 1).contiguous()
-    return tokens
-
-3. get_positional_encoding(self, feat)
-这个函数的作用是生成位置编码。
-
-- 参数:
-  - feat: 形状为 (b, c, h, w) 的特征图，其中 b 是 batch 大小，c 是通道数，h 和 w 分别是特征图的高度和宽度。
-- 步骤:
-  1. 获取 feat 的形状 (b, c, h, w)。
-  2. 创建一个形状为 (b, h, w) 的全零 mask，数据类型为布尔值，设备与 feat 相同。
-  3. 使用 self.pos_encoding 生成位置编码，输入为 mask。
-  4. 使用 reshape 方法将位置编码的形状从 (b, -1, h, w) 转换为 (b, -1, h, w)。
-- 返回:
-  - 形状为 (b, -1, h, w) 的位置编码。
-def get_positional_encoding(self, feat):
-    b, _, h, w = feat.shape
-    mask = torch.zeros((b, h, w), dtype=torch.bool, device=feat.device)
-    pos = self.pos_encoding(mask)
-    return pos.reshape(b, -1, h, w)
-
-总结
-token2feature 和 feature2token 是互逆的操作，分别用于将 token 转换为特征图和将特征图转换为 token。
-get_positional_encoding 用于生成位置编码，通常在 transformer 模型中用于提供位置信息。
-
-
-DLA 类的 forward 函数解释
-
-这个函数定义了一个模型的前向传播过程。它接受多个输入，并通过一系列操作生成输出。以下是详细的步骤解释：
-
-参数
-- x_rgb: RGB 图像的输入特征图。
-- x_t: 热红外图像的输入特征图。
-- pre_img_rgb: 前一帧的 RGB 图像特征图（可选）。
-- pre_img_t: 前一帧的热红外图像特征图（可选）。
-- pre_hm: 前一帧的热图（可选）。
-
-步骤
-1. 初始化输出列表:
-y = []
-2. 基础层处理:
-  - 对 x_rgb 和 x_t 进行基础层处理。
-x_rgb = self.base_layer(x_rgb)
-x_t = self.base_layer(x_t)
-3. 前一帧特征图处理:
-  - 对前一帧的特征图进行预处理。
-pre_img_rgb = self.pre_img_layer(pre_img_rgb)
-pre_img_t = self.pre_img_layer(pre_img_t)
-pre_hm = self.pre_hm_layer(pre_hm)
-4. Patch Embedding:
-  - 将特征图转换为 patch embedding。
-x_rgb_p = self.patchembed(x_rgb)
-x_t_p = self.patchembed(x_t)
-pre_x_rgb_p = self.patchembed(pre_img_rgb)
-pre_x_t_p = self.patchembed(pre_img_t)
-pre_hm_p = self.patchembed(pre_hm)
-5. 特征图转 token:
-  - 将 patch embedding 转换为 token。
-x_rgb_token = self.feature2token(x_rgb_p)
-x_t_token = self.feature2token(x_t_p)
-pre_x_rgb_token = self.feature2token(pre_x_rgb_p)
-pre_x_t_token = self.feature2token(pre_x_t_p)
-pre_hm_token = self.feature2token(pre_hm_p)
-6. 位置编码:
-  - 获取位置编码并将其转换为 token。
-pos_embed = self.get_positional_encoding(x_rgb_p)
-pos_embed_token = self.feature2token(pos_embed)
-7. 融合操作:
-  - 使用 fusion_m 方法对当前帧和前一帧的 token 进行融合。
-x_rgb_all = self.fusion_m(x_rgb_token, pre_x_rgb_token, pre_hm_token, pos_embed_token)
-x_t_all = self.fusion_m(x_t_token, pre_x_t_token, pre_hm_token, pos_embed_token)
-8. 最终融合:
-  - 使用 fusion 方法对融合后的 token 进行最终融合。
-[B, C, H, W] = x_rgb.shape
-result = self.fusion(x_rgb_all, x_t_all, pos_embed_token)
-9. Token 转特征图:
-  - 将融合结果转换回特征图。
-[b, c, h, w] = x_rgb_p.shape
-x_p = self.token2feature(result, h, w)
-10. 上采样和残差连接:
-  - 对特征图进行上采样，并与原始输入特征图进行残差连接。
-x = F.interpolate(x_p, size=(H, W), mode='bilinear', align_corners=True) + x_rgb + x_t
-11. 多尺度特征提取:
-  - 通过多个层级的特征提取模块，生成多尺度特征图。
-for i in range(6):
-    x = getattr(self, 'level{}'.format(i))(x)
-    y.append(x)
-12. 返回结果:
-  - 返回多尺度特征图列表。
-return y
-
-总结
-- 输入: RGB 图像特征图、热红外图像特征图、前一帧的 RGB 和热红外图像特征图、前一帧的热图。
-- 处理: 通过基础层、前一帧特征图处理、patch embedding、特征图转 token、位置编码、融合操作、最终融合、Token 转特征图、上采样和残差连接、多尺度特征提取等步骤。
-- 输出: 多尺度特征图列表。
-
-维度变换
-
-For prime image (if set C = 16)
-  initial shape: [B, 3, H, W] === base_layer ===> [B, 16, H, W]
-  [B, 16, H, W] === patchembed ===> [B, 16, H//16, W//16]
-  [B, 16, H//16, W//16] === feature2token ===> [(H//16)*(W//16), B, 16]
-  ( 
-  [B, 16, H//16, W//16] === get_positional_encoding ===> [B, 16, H//16, W//16]
-  [B, 16, H//16, W//16] === feature2token ===> [(H//16)*(W//16), B, 16]
-   )
-  [(H//16)*(W//16), B, 16] === fusion_m ===>  [(H//16)*(W//16), B, 16]
-  [(H//16)*(W//16), B, 16] === token2feature ===> [B, 16, H//16, W//16]
-  [B, 16, H//16, W//16] === F.interpolate ===> [B, 16, H, W]
-
-For the previous image, same as primes
-
-For the heatmap  (if set C = 16)
-initial shape: [B, 1, H, W] === base_layer ===> [B, 16, H, W]
-others same as primes
-
-函数梳理
-def feature2token(self, x)
-    B, C, W, H = x.shape    # batch size, channel, height, width
-    L = W * H    # patches
-    tokens = x.view(B, C, L).permute(2, 0, 1).contiguous()
-        # view : reshape x[B,C,W,H] as x[B,C,L], 
-        #        which combine height and width into one dimension.
-        # permute: rearrange x[B,C,L] as X[L,B,C]
-        # contiguous: make sure Tensor is contiguous in memory
-        
-def token2feature(self,tokens,h,w):
-    L,B,D=tokens.shape    # patches, batch size, feature dimention(Channel)
-    H,W=h,w
-    x = tokens.permute(1, 2, 0).view(B, D, H, W).contiguous()
-        # permute: rearrange tokens[L,B,D] as tokens[B,D,L]
-        # view: reshape last dimension into 2 dim{Height, Width}
-        # contiguous: make sure Tensor is contiguous in memory
-    return x
-fusion_m 梳理
-fusion_m call:
-  d_model = 16
-  nhead = 4
-  num_fusion_encoder_layers  1
-  dim_feedforward = 64
-call fusion_m(img, pre, hm, pos_embed)
-
----
-Transformer_Fusion_M
-  d_model = 16
-  nhead = 4
-  encoder_layer = TransformerEncoderLayer(d_model=16, nhead=4, dim_feedforward=64, dropout=0.1, activation=”relu”, normalize_before=False)
-  encoder = TransformerEncoder(encoder_layer, num_fusion_encoder_layers =1, encoder_norm = None)
-
----
-Transformer_Fusion_M. Forward()           call encoder(img, pre, hm, pos_embed)
-TransformerEncoder
-  layers = _get_clones(encoder_layer, num_layers = 1) = nn.ModuleList(TransformerEncoderLayer)
-  output = layers
-TransformerEncoderLayer
-  d_model = 16
-  nhead = 4
-  dim_feedforward = 64
-  dropout=0.1
-  activation=”relu”
-  
-  multihead_attn = nn.MultiheadAttention(16, 4, dropout=0.1)
-  linear1 = nn.Linear(16, 64)
-  linear2 = nn.Linear(64, 16)
-  dropout = dropout1 = dropout2 = nn.Dropout(0.1)
-  norm1 = norm2 = nn.LayerNorm(16)
-  activation = F.relu
-
-as call encoder(img, pre, hm, pos_embed)
-  src = img
-  pre_src = pre
-  pre_hm = hm
-  pos = pos_embed
-
-get_positional_encoding 梳理
-mask   torch.zeros(( b, h, w))        # all-zero
-
----
-PositionEmbeddingSine
-  num_pos_feats = 8
-  sine_type = ‘lin_sine’
-  avoid_aliazing = True
-  max_spatial_resolution = 60
-  temperature = 10000
-  sine = NerfPositionalEncoding(depth = 4, sine_type = ‘lin_sine’, avoid_aliazing = True, max_spatial_resolution = 60)
-  
-  ~mask     # all-one
-  ……
-  pos   torch.stack([x_embed, y_embed], dim=-1)     dimension: [b, h, w, 2]
-  out = self.sine(pos).permute(0, 3, 1, 2)
-
----
-call sine(pos)
-sine(pos) return a Tensor of (b, h, w, 16), which will be permuted as (b, 16, h, w) 
-
----
-NerfPosifionalEncoding
-  depth = 4
-  sine_type = ‘lin_sine’
-  avoid_aliazing = True
-  max_spatial_resolution = 60
-  bases = [1, 2, 3, 4]
-  factor = 60/4 = 15
-
-  out = torch.cat([torch.sin(i * self.factor * math.pi * inputs) for i in self.bases] +
-                          [torch.cos(i * self.factor * math.pi * inputs) for i in self.bases], axis=-1)
-          # [b, h, w, 2*depth*2 = 16]
-
-
-YOLO 代码
-数据处理
+YOLO-irhm 代码
+# 数据处理
 由于YOLO实时检测的特点，适合对单张图像进行处理。红外图像的时序信息尝试通过维度堆叠的方式融合到单张图像中。
-假设红外图像img : [1, h, w] , 前帧图像 pre_img : [1, h, w]，通过pre_img 生成前帧热图 pre_hm : [1, h, w]
+
+假设红外图像img : [h, w, 1] , 前帧图像 pre_img : [h, w, 1]，通过pre_img 生成前帧热图 pre_hm : [h, w, 1]
 合成图像 x : [3, h, w] ，堆叠方式 3 ==> {img, pre_img, pre_hm}
 
-单幅合成图像中包含时序信息，不需自定义 Dataset 类。运行单独的脚本提前处理数据集。
-测试部分还没想好
-模块编写
-在源码DLA类基础上修改，编写InfraredHeatmapFusion类，计划作为网络主干的输入层。
-模块 InfraredHeatmapFusion , 导入同目录下的类 
-  from .transformer_fusion import Transformer_Fusion_M
-  from .position_encoding import PositionEmbeddingSine
+~~单幅合成图像中包含时序信息，不需自定义 Dataset 类。运行单独的脚本提前处理数据集。~~
 
-ir_hm_fusion.py
+这部分已经写到自定义 Dataset 类中, 无需提前处理数据集。
+
+# 模块编写
+在源码 DLA 类基础上修改，编写 **InfraredHeatmapFusion** 类，计划作为网络主干的输入层。
+
+模块 InfraredHeatmapFusion , 导入同目录下的类 
+```
+from .transformer_fusion import Transformer_Fusion_M
+from .position_encoding import PositionEmbeddingSine
+```
+
+## ir_hm_fusion.py
 从PFTrack项目代码中梳理出来从输入图像到融合结果的变换过程，输入3通道合成图，拆分成三个单通道图像分别处理后进行特征融合。
+```
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -455,13 +98,15 @@ class InfraredHeatmapFusion(nn.Module):
         mask = torch.zeros((b, h, w), dtype=torch.bool, device=feat.device)
         pos = self.pos_encoding(mask)
         return pos.reshape(b, -1, h, w)
-    
-position_encoding.py
-这里自定义m_cumsum函数来替换源码的torch.cumsum调用。原因是torch.cumsum调用方式与cuda内核相关，会产生下面的警告，采用自定义函数明确化cumsum计算，运算速度有少许下降。
-  /home/rody/code/ultralytics/ultralytics/nn/modules/ir/position_encoding.py:52:  UserWarning: cumsum_cuda_kernel does not have a deterministic  implementation, but you set 'torch.use_deterministic_algorithms(True,  warn_only=True)'. You can file an issue at https://github.com/pytorch/pytorch/issues   to help us prioritize adding deterministic support for this operation.  (Triggered internally at  /opt/conda/conda-bld/pytorch_1720538438750/work/aten/src/ATen/Context.cpp:83.)   x_embed = not_mask.cumsum(2, dtype=torch.float32)
+```
 
+## position_encoding.py
+这里自定义 m_cumsum 函数来替换源码的torch.cumsum调用。原因是torch.cumsum调用方式与cuda内核相关，会产生下面的警告，采用自定义函数明确化cumsum计算，运算速度有少许下降。
+  
+/home/rody/code/ultralytics/ultralytics/nn/modules/ir/position_encoding.py:52:  UserWarning: cumsum_cuda_kernel does not have a deterministic  implementation, but you set 'torch.use_deterministic_algorithms(True,  warn_only=True)'. You can file an issue at https://github.com/pytorch/pytorch/issues   to help us prioritize adding deterministic support for this operation.  (Triggered internally at  /opt/conda/conda-bld/pytorch_1720538438750/work/aten/src/ATen/Context.cpp:83.)   x_embed = not_mask.cumsum(2, dtype=torch.float32)
+
+```
 import math
-
 import numpy as np
 import torch
 from numpy import dtype
@@ -548,8 +193,12 @@ class PositionEmbeddingSine(nn.Module):
         pos = torch.stack([x_embed, y_embed], dim=-1)
         out=self.sine(pos).permute(0, 3, 1, 2)
         return out
-transformer_fusion.py 
+        
+```
+
+## transformer_fusion.py 
 yolov8 默认启用 AWP（Automatic Mixed Precision），TransformerEncoderLayer.forward入参在训练过程中被 amp 自动转换为torch.float16，为保持张量正常匹配计算，把涉及多头注意力层计算的张量都进行手动转换。另外在训练前须指定参数dtype 为 torch.float32。
+```
 # --------------------------------------------------------------------*/
 # This file includes code from https://github.com/facebookresearch/detr/blob/main/models/detr.py
 # --------------------------------------------------------------------*/
@@ -664,8 +313,14 @@ def _get_activation_fn(activation):
     if activation == "glu":
         return F.glu
     raise RuntimeError(F"activation should be relu/gelu/glu, not {activation}.")
-ultralytics/nn/tasks.py 修改 parse_model(c, ch, verbose=True)
+    
+    
+```
+
+## ultralytics/nn/tasks.py 修改 parse_model(c, ch, verbose=True)
+
 导入ir包，添加对 InfraredHeatmapFusion 模块的解析。
+```
 from ultralytics.nn.modules.ir.ir_hm_fusion import InfraredHeatmapFusion as IrHmFusion
 
 def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
@@ -768,12 +423,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             ch = []
         ch.append(c2)
     return nn.Sequential(*layers), sorted(save)
+```
 
-
-训练测试
+# 训练测试
 yaml文件 
 把第0层换成 InfraredHeatmapFusion 模块。
 模型结构
+```
                    from  n    params  module                                       arguments                     
 using lin_sine as positional encoding
   0                  -1  1     71280  ultralytics.nn.modules.ir.ir_hm_fusion.InfraredHeatmapFusion[16, 16]                      
@@ -800,19 +456,20 @@ using lin_sine as positional encoding
  21                  -1  1    493056  ultralytics.nn.modules.block.C2f             [384, 256, 1]                 
  22        [15, 18, 21]  1    751702  ultralytics.nn.modules.head.Detect           [2, [64, 128, 256]]           
 YOLOv8-irhm summary: 251 layers, 3,082,054 parameters, 3,082,038 gradients
-
+```
 
 
 在本机上训练：
+```
 model.to(dtype=torch.float32, device='cuda')
 result = model.train(data='vtuav-irhm.yaml',
                      name='yolov8_irhm',
                      epochs=50,
                      workers=8,
                      batch=1)
-
+```
 结果：
-tm
+```
 Validating runs/detect/yolov8_irhm6/weights/best.pt...
 WARNING ⚠️ validating an untrained model YAML will result in 0 mAP.
 Ultralytics 8.3.35 🚀 Python-3.8.20 torch-2.4.0 CUDA:0 (NVIDIA GeForce GTX 1650 Ti, 3897MiB)
@@ -823,26 +480,15 @@ YOLOv8-irhm summary (fused): 195 layers, 3,076,870 parameters, 0 gradients
                    car         42        303     0.0215      0.284     0.0139      0.003
 Speed: 0.3ms preprocess, 78.1ms inference, 0.0ms loss, 0.7ms postprocess per image
 Results saved to runs/detect/yolov8_irhm6
+```
 
+# Dataset类实现
 
-Dataset类
+把数据处理的工作移到自定义数据集类中。
 
-12.02 继承torch.util.data.Dataset 的自定义Dataset类实现，未测试。准备再修改，到YOLO中使用。
-
-继承YOLODataset类，重写__getitem__。重写BaseDataset中的 load_image，在这一级完成 image concat。
-  
-  image concat 必需入参： idx， ann_path 
-  img2label_paths 把图像文件路径转换为对应的标签文件路径 。仿写此函数。
-  
-  img_path = '/home/rody/datas/irhm1128/train'
-  im_files 是str list , 储存路径 如 ['/home/rody/datas/irhm1128/train/images/000001.jpg', ... ]
-  label_files 是str list , 储存路径 如 ['/home/rody/datas/irhm1128/train/images/000001.txt', ... ]
-  
-  self.label_files[i]
-
-
-ultralytics/data/dataset.py
+## ultralytics/data/dataset.py
   自定义类YOLOIRHMDataset , 继承 YOLODataset, 重写 load_image, 完成hm generate 与 image concat.
+```
 import math
 
 class YOLOIRHMDataset(YOLODataset):
@@ -998,9 +644,12 @@ class YOLOIRHMDataset(YOLODataset):
         if min(masked_gaussian.shape) > 0 and min(masked_heatmap.shape) > 0:  # TODO debug
             np.maximum(masked_heatmap, masked_gaussian * k, out=masked_heatmap)
         return heatmap
-        
+```        
 
-ultralytics/data/build.py
+## ultralytics/data/build.py
+修改源码调用，使用自定义的数据集类。
+
+```
 from ultralytics.data.dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset, YOLOIRHMDataset
 
 def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, stride=32, multi_modal=False):
@@ -1028,3 +677,13 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         data=data,
         fraction=cfg.fraction if mode == "train" else 1.0,
     )
+```
+
+# 后续计划
+
+1. 目前只在本机上测试过, 后续需要部署到服务器训练查看模型效果。
+
+2. 自定义 Dataset 类与 irhm 模块修改，扩展到一般可见光图像检测。
+    
+   1. 对可见光, 模块 base_layer 用三通道, 要求传入的数据已经是 7 通道 (3+3+1)
+   2. 自定义数据集类，继承 YOLODataset 类，添加对 7 通道的支持。
