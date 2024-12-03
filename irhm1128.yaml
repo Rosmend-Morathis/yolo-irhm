@@ -1,0 +1,6 @@
+path: /home/rody/datas/irhm1128-ir/
+train: train
+val: val
+
+nc: 2
+names: ['person', 'car']
