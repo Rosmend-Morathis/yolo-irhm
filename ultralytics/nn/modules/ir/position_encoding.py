@@ -26,9 +26,12 @@ class NerfPositionalEncoding(nn.Module):
 
     @torch.no_grad()
     def forward(self, inputs):
-        out = torch.cat([torch.sin(i * self.factor * math.pi * inputs) for i in self.bases] +
-                        [torch.cos(i * self.factor * math.pi * inputs) for i in self.bases], axis=-1)
-        #pdb.set_trace()
+        sin_tensors = [torch.sin(i * self.factor * math.pi * inputs).float() for i in self.bases]
+        cos_tensors = [torch.cos(i * self.factor * math.pi * inputs).float() for i in self.bases]
+        d_tensors = tuple(sin_tensors + cos_tensors)
+        # out = torch.cat([torch.sin(i * self.factor * math.pi * inputs) for i in self.bases] +
+        #                 [torch.cos(i * self.factor * math.pi * inputs) for i in self.bases], axis=-1, dtype=torch.float32)
+        out = torch.cat(d_tensors, dim=-1)
         assert torch.isnan(out).any() == False
         return out
 
@@ -77,8 +80,8 @@ class PositionEmbeddingSine(nn.Module):
         not_mask = ~mask
         # y_embed = not_mask.cumsum(1, dtype=torch.float16)
         # x_embed = not_mask.cumsum(2, dtype=torch.float16)
-        y_embed = m_cumsum(not_mask, 1, dtype=torch.float16)
-        x_embed = m_cumsum(not_mask, 2, dtype=torch.float16)
+        y_embed = m_cumsum(not_mask, 1, dtype=torch.float32)
+        x_embed = m_cumsum(not_mask, 2, dtype=torch.float32)
         # print(y_embed.dtype, x_embed.dtype)
         eps = 1e-6
         y_embed = (y_embed-0.5) / (y_embed[:, -1:, :] + eps)
