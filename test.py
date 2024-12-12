@@ -9,8 +9,7 @@ yaml = 'ultralytics/cfg/models/v8/yolov8-irhm.yaml'
 
 model = YOLO(yaml)
 # model = YOLO('yolov8n.pt')
-
-model.info()
+# model.info()
 
 if __name__ == "__main__":
 
