@@ -609,7 +609,7 @@ class YOLOIRHMDataset(YOLODataset):
                 ct = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
                 ct_int = ct.astype(np.int32)
                 pre_cts.append(ct)
-                pre_hm[0] = self.draw_umich_gaussian(pre_hm[0], ct_int, radius, 255)
+                pre_hm[0] = self.draw_umich_gaussian(pre_hm[0], ct_int, radius, 1)
 
         return pre_hm[0], pre_cts
 
