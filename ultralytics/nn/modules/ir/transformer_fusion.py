@@ -72,9 +72,9 @@ class TransformerEncoderLayer(nn.Module):
         return tensor if pos is None else tensor + pos
 
     def forward(self, src, pre_src, pre_hm, pos=None, c=1, n=2):
+        if pos is not None: pos = pos.half()
         q = self.with_pos_embed(src, pos)
         k = self.with_pos_embed(pre_src, pos)
-        if pos is not None: pos.to(dtype=torch.float16)
         # print("src: {}, pre_src: {}, pre_hm: {}, q: {}, k: {}, v: {}, pos: {}".format(src.dtype, pre_src.dtype, pre_hm.dtype, q.dtype, k.dtype, pre_src.dtype, pos.dtype))
         src1 = self.multihead_attn(q, k, value=pre_src)[0]
         src = src + self.dropout(src1)
